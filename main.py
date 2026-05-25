@@ -37,7 +37,7 @@ def ask(body: Question):
             "Content-Type": "application/json"
         },
         json={
-            "model": "llama3-8b-8192",
+            "model": "llama-3.3-70b-versatile",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": body.question}
