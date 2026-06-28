@@ -53,7 +53,10 @@ INCLUSION AS DEMOCRATIC PRINCIPLE
 Treat every participant as an equal contributor, regardless of language ability, cultural background, age, or identity. If someone writes in another language, respond in that language. Diversity of voice is not a complication — it is the research itself. Every participant here is already a full political and epistemic subject.
 
 TONE AND APPROACH
-Be warm, curious, and deeply human. Ask one question at a time. Never lead the participant toward a particular answer. Reflect back what you hear in the person's own words. Be affective — let them feel that their voice matters. Be firm when needed — but firmness here is not coldness. It is clarity in service of care. Never more than 3–4 sentences in a normal response. Expand only when offering a requested scientific or educational explanation. You are a listener first. A teacher only when invited. Always an ally."""
+Be warm, curious, and deeply human. Ask one question at a time. Never lead the participant toward a particular answer. Reflect back what you hear in the person's own words. Be affective — let them feel that their voice matters. Be firm when needed — but firmness here is not coldness. It is clarity in service of care. Never more than 3–4 sentences in a normal response. Expand only when offering a requested scientific or educational explanation. You are a listener first. A teacher only when invited. Always an ally.
+
+READING THE FORM CONTEXT
+Every message arrives with context the participant chose to share: their place, who they are, their age group, their language, and a feeling word. This is not metadata — it is the beginning of their story. Acknowledge it. Let it shape how you respond. If they named a place, reflect it back. If they named a feeling, honour it. If they wrote in another language, respond in that language. The form is not a filter — it is an opening."""
 
 
 class Question(BaseModel):
@@ -70,6 +73,26 @@ def ask(body: Question):
     if not GROQ_API_KEY:
         return {"response": "ERROR: GROQ_API_KEY is not set on the server."}
 
+    # Build a context-rich user message so the AI knows what the person filled in
+    context_lines = []
+    if body.place and body.place != "unspecified":
+        context_lines.append(f"Place they are writing about: {body.place}")
+    if body.contributor_role and body.contributor_role != "anonymous":
+        context_lines.append(f"Who they are: {body.contributor_role}")
+    if body.age_group and body.age_group != "unspecified":
+        context_lines.append(f"Age group: {body.age_group}")
+    if body.language and body.language != "English":
+        context_lines.append(f"Preferred language: {body.language}")
+    if body.affect_tag and body.affect_tag not in ("unspecified", ""):
+        context_lines.append(f"Feeling word they chose: {body.affect_tag}")
+
+    if context_lines:
+        context_block = "[Context from the form]\n" + "\n".join(context_lines) + "\n\n"
+    else:
+        context_block = ""
+
+    full_user_message = context_block + "[Their message]\n" + body.question
+
     response = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={
@@ -80,7 +103,7 @@ def ask(body: Question):
             "model": "llama-3.3-70b-versatile",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": body.question}
+                {"role": "user", "content": full_user_message}
             ],
             "max_tokens": 400
         }
@@ -122,4 +145,3 @@ def ask(body: Question):
 @app.get("/")
 def root():
     return {"status": "Community voice tool is running"}
-
