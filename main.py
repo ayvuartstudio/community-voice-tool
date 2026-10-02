@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import os
+import time
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -70,23 +71,33 @@ def ask(body: Question):
     if not MISTRAL_API_KEY:
         return {"response": "ERROR: MISTRAL_API_KEY is not set on the server."}
 
-    response = requests.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {MISTRAL_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "mistral-small-2603",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": body.question}
-            ],
-            "max_tokens": 400
-        }
-    )
+    max_attempts = 4
+    data = {}
+    for attempt in range(max_attempts):
+        response = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "mistral-small-2603",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": body.question}
+                ],
+                "max_tokens": 400
+            }
+        )
 
-    data = response.json()
+        if response.status_code == 429:
+            logger.info(f"Mistral rate-limited (attempt {attempt + 1}/{max_attempts}), retrying...")
+            time.sleep(1.5 * (attempt + 1))
+            continue
+
+        data = response.json()
+        break
+
     if "choices" not in data:
         return {"response": f"Mistral error: {data}"}
 
