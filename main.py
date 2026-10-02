@@ -77,7 +77,7 @@ def ask(body: Question):
             "Content-Type": "application/json"
         },
         json={
-            "model": "mistral-small-latest",
+            "model": "mistral-small-2603",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": body.question}
