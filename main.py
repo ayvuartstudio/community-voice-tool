@@ -1,10 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import os
 import time
 import logging
+from collections import defaultdict, deque
+from datetime import date
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,6 +23,59 @@ app.add_middleware(
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
 SUPABASE_URL = "https://gjuxyouwuxeftbxfcyzj.supabase.co"
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+# ---------------------------------------------------------------------------
+# Rate limiting / budget safety net
+#
+# Two independent guards, both configurable via environment variables so you
+# can tighten or loosen them without touching code:
+#
+# 1. Per-IP limit: stops one person (or a bot) from hammering the endpoint.
+# 2. Global daily cap: a hard stop across ALL users, so a real spike in
+#    traffic can never run past a predictable worst-case cost in one day.
+#
+# Both live in memory, which is fine for a single-process pilot deployment.
+# If you later run multiple server processes/instances, these counters won't
+# be shared between them — worth moving to Redis or a DB column at that point.
+# ---------------------------------------------------------------------------
+
+PER_IP_LIMIT = int(os.environ.get("RATE_LIMIT_PER_IP_PER_MINUTE", "5"))
+PER_IP_WINDOW_SECONDS = 60
+GLOBAL_DAILY_LIMIT = int(os.environ.get("RATE_LIMIT_GLOBAL_PER_DAY", "500"))
+
+_ip_request_times: dict[str, deque] = defaultdict(deque)
+_global_day: str = date.today().isoformat()
+_global_count: int = 0
+
+
+def _check_rate_limits(client_ip: str) -> None:
+    global _global_day, _global_count
+
+    now = time.time()
+
+    # --- Per-IP sliding window ---
+    times = _ip_request_times[client_ip]
+    while times and now - times[0] > PER_IP_WINDOW_SECONDS:
+        times.popleft()
+    if len(times) >= PER_IP_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please wait a moment before asking again "
+                   f"(limit: {PER_IP_LIMIT} per minute).",
+        )
+    times.append(now)
+
+    # --- Global daily cap (resets at UTC midnight) ---
+    today = date.today().isoformat()
+    if today != _global_day:
+        _global_day = today
+        _global_count = 0
+    if _global_count >= GLOBAL_DAILY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="This tool has reached its daily usage limit. Please try again tomorrow.",
+        )
+    _global_count += 1
 
 SYSTEM_PROMPT = """You are a community research assistant for an academic PhD project studying place, belonging, and cultural experience in Ōtautahi Christchurch, New Zealand. Your role is to listen deeply, ask thoughtful questions, and collect community voices about how people experience urban space and culture in this city.
 
@@ -67,7 +122,10 @@ class Question(BaseModel):
 
 
 @app.post("/ask")
-def ask(body: Question):
+def ask(body: Question, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limits(client_ip)
+
     if not MISTRAL_API_KEY:
         return {"response": "ERROR: MISTRAL_API_KEY is not set on the server."}
 
@@ -103,27 +161,36 @@ def ask(body: Question):
 
     ai_response = data["choices"][0]["message"]["content"]
 
+    # Saving to Supabase is a nice-to-have, never a reason to fail the request.
+    # The participant must get their response back even if the database write
+    # fails or Supabase itself is unreachable (paused project, network issue,
+    # DNS failure, etc.) — previously an unhandled exception here crashed the
+    # whole endpoint and the person saw nothing but a generic error.
     logger.info(f"Saving to Supabase... KEY exists: {bool(SUPABASE_KEY)}")
     if SUPABASE_KEY:
-        db_response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/voices",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal"
-            },
-            json={
-                "place": body.place,
-                "contributor_role": body.contributor_role,
-                "age_group": body.age_group,
-                "language": body.language,
-                "affect_tag": body.affect_tag,
-                "message": body.question,
-                "ai_response": ai_response
-            }
-        )
-        logger.info(f"Supabase response: {db_response.status_code} - {db_response.text}")
+        try:
+            db_response = requests.post(
+                f"{SUPABASE_URL}/rest/v1/voices",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                },
+                json={
+                    "place": body.place,
+                    "contributor_role": body.contributor_role,
+                    "age_group": body.age_group,
+                    "language": body.language,
+                    "affect_tag": body.affect_tag,
+                    "message": body.question,
+                    "ai_response": ai_response
+                },
+                timeout=10
+            )
+            logger.info(f"Supabase response: {db_response.status_code} - {db_response.text}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Supabase save failed (continuing anyway): {e}")
     else:
         logger.error("SUPABASE_KEY is not set!")
 
